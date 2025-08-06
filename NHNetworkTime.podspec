@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = 'NHNetworkTime'
-  s.version      = '1.7.1'
+  s.version      = '1.7.2'
   s.summary      = 'Simple Network Time Protocol SNTP for iOS.'
   s.homepage     = 'https://github.com/huynguyencong/NHNetworkTime'
   s.license      = { :type => 'Apache', :file => 'LICENSE' }

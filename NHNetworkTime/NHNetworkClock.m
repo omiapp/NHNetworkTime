@@ -7,7 +7,7 @@
 
 @interface NHNetworkClock () <NHNetAssociationDelegate>
 
-@property NSMutableArray *timeAssociations;
+@property (atomic, copy) NSArray *timeAssociations;
 @property NSArray *sortDescriptors;
 @property NSSortDescriptor *dispersionSortDescriptor;
 @property dispatch_queue_t associationDelegateQueue;
@@ -31,7 +31,7 @@
 - (instancetype)init {
     if (self = [super init]) {
         self.sortDescriptors = @[[[NSSortDescriptor alloc] initWithKey:@"dispersion" ascending:YES]];
-        self.timeAssociations = [NSMutableArray arrayWithCapacity:100];
+        self.timeAssociations = [NSArray array];
         self.shouldUseSavedSynchronizedTime = YES;
         self.isAutoSynchronizedWhenUserChangeLocalTime = YES;
         
@@ -52,50 +52,71 @@
 - (void)reset {
     self.isSynchronized = NO;
     [self finishAssociations];
-    [self.timeAssociations removeAllObjects];
+    self.timeAssociations = [NSArray array];
 }
 
 // Return the offset to network-derived UTC.
 
 - (NSTimeInterval)networkOffset {
-    
-    double timeInterval = 0.0;
-    short usefulCount = 0;
-    
-    if(self.timeAssociations.count > 0) {
-    
-        NSArray *sortedArray = [[self.timeAssociations sortedArrayUsingDescriptors:self.sortDescriptors] filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(id  _Nonnull evaluatedObject, NSDictionary<NSString *,id> * _Nullable bindings) {
-            return [evaluatedObject isKindOfClass:[NHNetAssociation class]];
-        }]];
-        
-        for (NHNetAssociation * timeAssociation in sortedArray) {
-            if (timeAssociation.active) {
-                if (timeAssociation.trusty) {
-                    usefulCount++;
-                    timeInterval = timeInterval + timeAssociation.offset;
-                }
-                else {
-                    if ([self.timeAssociations count] > 8) {
-                        [self.timeAssociations removeObject:timeAssociation];
-                        [timeAssociation finish];
-                    }
-                }
-                
-                if (usefulCount == 8) break;                // use 8 best dispersions
+    // 1. 过滤出所有 active 的 NHNetAssociation 对象 (O(N))
+    NSMutableArray *mutableAssciation = self.timeAssociations.mutableCopy;
+    NSPredicate *filterPredicate = [NSPredicate predicateWithBlock:^BOOL(id evaluatedObject, NSDictionary *bindings) {
+        return [evaluatedObject isKindOfClass:[NHNetAssociation class]] && ((NHNetAssociation *)evaluatedObject).active;
+    }];
+    NSArray<NHNetAssociation *> *activeAssociations = [mutableAssciation filteredArrayUsingPredicate:filterPredicate];
+
+    // 2. 将 active 的对象分为 trusty 和 non-trusty 两组 (O(N))
+    NSMutableArray<NHNetAssociation *> *trustyAssociations = [NSMutableArray array];
+    NSMutableArray<NHNetAssociation *> *associationsToRemove = [NSMutableArray array];
+
+    for (NHNetAssociation *association in activeAssociations) {
+        if (association.trusty) {
+            [trustyAssociations addObject:association];
+        } else {
+            // 如果 non-trusty 且总数超过8，则标记为待删除
+            if (self.timeAssociations.count > 8) {
+                [associationsToRemove addObject:association];
+            }
+        }
+    }
+
+    // 3. 对 non-trusty 对象进行清理（在所有计算完成后）
+    if (associationsToRemove.count > 0) {
+        [mutableAssciation removeObjectsInArray:associationsToRemove];
+        for (NHNetAssociation *association in associationsToRemove) {
+            [association finish];
+        }
+        self.timeAssociations = mutableAssciation;
+    }
+
+    // 4. 对 trusty 对象进行计算
+    NSTimeInterval totalOffset = 0.0;
+    NSUInteger usefulCount = 0;
+
+    if (trustyAssociations.count > 0) {
+        // 5. 只对 trusty 对象进行排序 (O(k log k)，k 是 trusty 对象的数量)
+        [trustyAssociations sortUsingDescriptors:self.sortDescriptors];
+
+        // 6. 计算前8个最佳结果的平均值
+        for (NHNetAssociation *association in trustyAssociations) {
+            totalOffset += association.offset;
+            usefulCount++;
+            if (usefulCount == 8) {
+                break;
             }
         }
     }
     
     if (usefulCount > 0) {
-        timeInterval = timeInterval / usefulCount;
-    }
-    else {
-        if(self.shouldUseSavedSynchronizedTime) {
-            timeInterval = [[NSUserDefaults standardUserDefaults] doubleForKey:kTimeOffsetKey];
-        }
+        return totalOffset / usefulCount;
     }
 
-    return timeInterval;
+    // 7. 如果没有任何 trusty 的结果，则使用备用方案
+    if (self.shouldUseSavedSynchronizedTime) {
+        return [[NSUserDefaults standardUserDefaults] doubleForKey:kTimeOffsetKey];
+    }
+
+    return 0.0;
 }
 
 #pragma mark - Get time
@@ -180,20 +201,22 @@
 		NTP_Logging(@"%@", hostAddresses);                          // all the addresses resolved
 
 		// ... now start one 'association' (network clock server) for each address.
+        NSMutableArray *mutableAssociations = [NSMutableArray arrayWithCapacity:100];
 		for (NSString *server in hostAddresses) {
 			NHNetAssociation *    timeAssociation = [[NHNetAssociation alloc] initWithServerName:server];
 			timeAssociation.delegate = self;
 
-			[self.timeAssociations addObject:timeAssociation];
+			[mutableAssociations addObject:timeAssociation];
 			[timeAssociation enable];                               // starts are randomized internally
 		}
+        self.timeAssociations = mutableAssociations;
 	}
 }
 
 // Stop all the individual ntp clients associations ..
 
 - (void)finishAssociations {
-    NSArray *timeAssociationsCopied = [self.timeAssociations copy];
+    NSArray *timeAssociationsCopied = self.timeAssociations;
     for (NHNetAssociation * timeAssociation in timeAssociationsCopied) {
         timeAssociation.delegate = nil;
         [timeAssociation finish];
