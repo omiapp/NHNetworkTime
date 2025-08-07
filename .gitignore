@@ -1,6 +1,7 @@
 # Xcode
 #
 build/
+NHNetworkTime_Local.podspec
 *.pbxuser
 !default.pbxuser
 *.mode1v3
